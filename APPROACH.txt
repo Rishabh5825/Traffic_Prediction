@@ -1,0 +1,132 @@
+            TRAFFIC DEMAND PREDICTION — PROJECT APPROACH
+
+1. PROBLEM STATEMENT
+--------------------
+Predict traffic demand at specific geographic locations and timestamps.
+The dataset provides geohash-encoded locations, timestamps, road metadata,
+weather conditions, and other contextual features. The target variable is
+"demand" (continuous). Evaluation metric: RMSE.
+
+
+2. APPROACH OVERVIEW
+--------------------
+We built a 3-model weighted ensemble (CatBoost + LightGBM + XGBoost)
+with extensive spatial feature engineering and 5-Fold Cross-Validation
+for robust evaluation and prediction.
+
+The pipeline:
+  1. Decode geohash strings into latitude/longitude coordinates.
+  2. Engineer spatial, temporal, and contextual features.
+  3. Train three gradient boosting models per CV fold.
+  4. Combine predictions using inverse-RMSE weighted averaging.
+  5. Average test predictions across all 5 folds for the final output.
+
+
+3. FEATURE ENGINEERING
+---------------------------------
+All feature engineering is performed in the `engineer_features()` function.
+Features are computed on the combined train+test set to ensure consistent
+encoding.
+
+  A) GEOHASH SPATIAL FEATURES
+     - Custom geohash decoder (no external library) converts 6-character
+       geohash strings to (latitude, longitude) pairs.
+     - Geohash prefix hierarchy: gh_prefix_3, gh_prefix_4, gh_prefix_5
+       (captures spatial granularity at different zoom levels).
+
+  B) POLYNOMIAL SPATIAL INTERACTIONS
+     - lat_squared         = latitude ^ 2
+     - lon_squared         = longitude ^ 2
+     - lat_lon_interaction = latitude * longitude
+     Purpose: Allows tree models to capture non-linear spatial patterns
+     (e.g., demand hotspots) with fewer splits. Without these, a tree
+     needs many axis-aligned splits to isolate a diagonal region.
+
+  C) DISTANCE FROM CENTROID
+     - dist_from_center = Euclidean distance from the dataset's spatial
+       centroid (mean lat, mean lon).
+     Purpose: Captures radial demand patterns — high-traffic city center
+     vs. quieter outskirts — in a single feature.
+
+  D) KMEANS SPATIAL CLUSTERS
+     - KMeans(n_clusters=8) fitted on (latitude, longitude).
+     - spatial_cluster column added as a categorical feature.
+     Purpose: Groups nearby locations into "neighborhood zones", giving
+     models a coarse spatial grouping they can split on efficiently.
+
+  E) TIME FEATURES
+     - hour, minute          (extracted from timestamp string)
+     - time_slot             (hour * 4 + minute // 15 → 96 slots/day)
+     - hour_sin, hour_cos    (cyclical encoding for hour)
+     - is_peak               (1 if hour in {7,8,9,17,18,19}, else 0)
+
+  F) MISSING VALUE IMPUTATION
+     - RoadType    → filled with 'Residential'
+     - Weather     → filled with 'Sunny'
+     - Temperature → filled with column median
+
+  G) CATEGORICAL ENCODING
+     - All categorical columns (geohash, RoadType, LargeVehicles,
+       Landmarks, Weather, gh_prefix_3/4/5, spatial_cluster) are
+       label-encoded for compatibility across all three models.
+     - CatBoost and LightGBM additionally receive the cat_col_names
+       list to handle these as native categoricals.
+
+
+4. MODELS USED
+--------------
+  A) CatBoost (CatBoostRegressor)
+     - iterations: 2000, learning_rate: 0.05, depth: 6
+     - Native categorical feature support.
+     - Early stopping: 100 rounds.
+
+  B) LightGBM (lgb.train)
+     - num_boost_round: 2000, learning_rate: 0.05
+     - num_leaves: 127, min_child_samples: 20
+     - feature_fraction: 0.8, bagging_fraction: 0.8
+     - Native categorical feature support.
+     - Early stopping: 100 rounds.
+
+  C) XGBoost (XGBRegressor)
+     - n_estimators: 2000, learning_rate: 0.05, max_depth: 6
+     - subsample: 0.8, colsample_bytree: 0.8, min_child_weight: 5
+     - tree_method: 'hist' (histogram-based, fast).
+     - Early stopping: 100 rounds.
+
+
+5. CROSS-VALIDATION STRATEGY
+-----------------------------
+  - 5-Fold KFold (shuffle=True, random_state=42).
+  - Each fold trains all 3 models independently.
+  - Out-of-fold (OOF) predictions collected for the full training set.
+  - Test predictions averaged across all 5 folds (1/5 weight per fold).
+  - Final metrics computed on the full OOF prediction vector — this
+    gives a more reliable estimate than a single train/val split.
+
+
+6. ENSEMBLE METHOD
+------------------
+  - Weighted average ensemble.
+  - Weights: inverse of each model's OOF RMSE.
+      w_model = (1 / model_OOF_RMSE) / sum(1 / all_OOF_RMSEs)
+  - Applied to both OOF predictions (for evaluation) and averaged
+    test predictions (for the submission file).
+
+
+7. TOOLS & LIBRARIES
+---------------------
+  Language:    Python 3.11.9
+  Environment: Jupyter Notebook
+  Libraries:
+    - pandas          — Data loading and manipulation
+    - numpy           — Numerical operations
+    - scikit-learn    — KFold, KMeans, LabelEncoder, metrics
+    - catboost        — CatBoostRegressor
+    - lightgbm        — LightGBM training API
+    - xgboost         — XGBRegressor
+
+
+8. OUTPUT
+---------
+  - prediction.csv  — Final submission file (Index, demand columns).
+  - Generated from the 3-model weighted ensemble averaged across 5 folds.
